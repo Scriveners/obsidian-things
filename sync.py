@@ -6,6 +6,8 @@ import urllib.parse
 from things_api import ThingsAPI
 from obsidian_api import ObsidianAPI
 
+METADATA_FILE = "sync_metadata.json"
+
 def load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     if not os.path.exists(config_path):
@@ -27,23 +29,41 @@ def load_config():
         print(f"Error reading configuration file: {e}")
         sys.exit(1)
 
+def load_metadata():
+    metadata_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), METADATA_FILE)
+    if not os.path.exists(metadata_path):
+        return {}
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to read metadata file: {e}. Starting fresh.")
+        return {}
+
+def save_metadata(metadata):
+    metadata_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), METADATA_FILE)
+    try:
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error: Failed to save metadata file: {e}")
+
 def main():
     config = load_config()
+    metadata = load_metadata()
     
     vault_path = config["obsidian_vault_path"]
     logs_relative = config["daily_logs_relative_path"]
     db_path = config["things_db_path"]
     sync_days = config.get("sync_days", 7)
-    import_tag = config.get("things_import_tag", "obsidian")
     
     # Extract Obsidian vault name from path
     vault_name = os.path.basename(os.path.normpath(vault_path))
     
-    print("Initializing sync...")
+    print("Initializing sync (Obsidian Read-Only Mode)...")
     print(f"Obsidian Vault: {vault_path} (Name: {vault_name})")
     print(f"Things DB: {db_path}")
     print(f"Sync Window: Last {sync_days} days")
-    print(f"Things Import Tag: '{import_tag}'")
     print("-" * 50)
     
     try:
@@ -54,9 +74,9 @@ def main():
         sys.exit(1)
         
     today = datetime.date.today()
+    metadata_changed = False
     
-    # 1. Sync tasks from Obsidian Daily Logs to Things
-    print("Step 1: Syncing Obsidian Daily Logs -> Things 3")
+    # Sync tasks from Obsidian Daily Logs -> Things
     for i in range(sync_days):
         target_date = today - datetime.timedelta(days=i)
         date_str = target_date.strftime("%Y%m%d")
@@ -68,16 +88,26 @@ def main():
         print(f"Scanning log: {date_str}.md")
         tasks = obsidian.parse_daily_log(filepath)
         
-        updates = {}
+        if date_str not in metadata:
+            metadata[date_str] = {}
+            metadata_changed = True
+            
         for task in tasks:
-            line_no = task["line_no"]
             title = task["title"]
             completed = task["completed"]
-            uuid = task["uuid"]
-            indent = task["indent"]
-            raw_line = task["raw_line"]
+            task_hash = task["hash"]
+            legacy_uuid = task["legacy_uuid"]
             
-            # Case A: Task has no Things UUID -> Create it in Things
+            # Lookup UUID from metadata database first, fallback to legacy inline UUID
+            uuid = metadata[date_str].get(task_hash) or legacy_uuid
+            
+            # If the legacy inline UUID was found but not in metadata database, save it
+            if legacy_uuid and task_hash not in metadata[date_str]:
+                metadata[date_str][task_hash] = legacy_uuid
+                metadata_changed = True
+                uuid = legacy_uuid
+                
+            # Case A: Task has no Things UUID mapped -> Create it in Things
             if not uuid:
                 # Create obsidian link for Things Notes
                 rel_filepath = os.path.join(logs_relative, f"{date_str}.md")
@@ -88,24 +118,23 @@ def main():
                 try:
                     new_uuid = things.create_task(title, notes=obsidian_link)
                     
+                    # Update metadata mapping locally
+                    metadata[date_str][task_hash] = new_uuid
+                    metadata_changed = True
+                    
                     # If it was already completed in Obsidian, mark it completed in Things too
                     if completed:
                         print(f"  [~] Marking task as completed in Things: '{title}'")
                         things.update_task_status(new_uuid, 'completed')
-                        new_line = f"{indent}- [x] {title} %%things:{new_uuid}%%"
-                    else:
-                        new_line = f"{indent}- [ ] {title} %%things:{new_uuid}%%"
-                        
-                    updates[line_no] = new_line
                 except Exception as e:
                     print(f"  [!] Failed to create task in Things: {e}")
             
-            # Case B: Task has Things UUID -> Bidirectional Status Sync
+            # Case B: Task is already mapped to a Things UUID -> Status Sync (Obsidian -> Things)
             else:
                 try:
                     things_task = things.get_task_by_uuid(uuid)
                     if not things_task:
-                        print(f"  [!] Task with UUID {uuid} not found in Things DB (deleted/archived?). Skipping.")
+                        print(f"  [!] Task with UUID {uuid} not found in Things DB (deleted?). Skipping.")
                         continue
                         
                     if things_task["trashed"]:
@@ -119,67 +148,16 @@ def main():
                         print(f"  [-> Things] Completing task: '{title}'")
                         things.update_task_status(uuid, 'completed')
                     elif not completed and things_status in [3, 1]:
-                        # Obsidian is open, Things is completed/canceled -> Check off in Obsidian
-                        status_name = "completed" if things_status == 3 else "canceled"
-                        print(f"  [-> Obsidian] Syncing '{status_name}' status for: '{title}'")
-                        new_line = f"{indent}- [x] {title} %%things:{uuid}%%"
-                        updates[line_no] = new_line
+                        # Things is completed, but Obsidian is Read-only. Log and skip.
+                        pass
                 except Exception as e:
-                    print(f"  [!] Error syncing status for task '{title}' ({uuid}): {e}")
+                    print(f"  [!] Error checking status for task '{title}' ({uuid}): {e}")
                     
-        # Apply updates to daily log file if there are any
-        if updates:
-            print(f"  [*] Writing {len(updates)} updates to {date_str}.md")
-            try:
-                obsidian.update_tasks_in_file(filepath, updates)
-            except Exception as e:
-                print(f"  [!] Failed to update file {filepath}: {e}")
-                
-    print("-" * 50)
-    
-    # 2. Import tagged tasks from Things -> Obsidian Today's Daily Log
-    if import_tag:
-        print(f"Step 2: Importing new tasks with tag '{import_tag}' from Things -> Obsidian Today")
-        try:
-            tagged_tasks = things.get_tasks_by_tag(import_tag)
-            
-            if not tagged_tasks:
-                print("  No new tagged tasks found in Things.")
-            else:
-                today_date_str = today.strftime("%Y%m%d")
-                today_filepath = obsidian.get_daily_log_path(today_date_str)
-                
-                # Fetch existing obsidian tasks to prevent duplicates
-                existing_tasks = obsidian.parse_daily_log(today_filepath)
-                existing_uuids = {t["uuid"] for t in existing_tasks if t["uuid"]}
-                
-                for t_task in tagged_tasks:
-                    t_uuid = t_task["uuid"]
-                    t_title = t_task["title"]
-                    t_notes = t_task["notes"]
-                    
-                    # Skip if already imported
-                    if t_uuid in existing_uuids:
-                        continue
-                        
-                    # Skip if notes already contain obsidian link (double-safety)
-                    if "obsidian://open" in t_notes:
-                        continue
-                        
-                    print(f"  [+] Importing tagged task: '{t_title}'")
-                    # Append task to today's daily log
-                    obsidian.add_task_to_section(today_filepath, t_title, t_uuid)
-                    
-                    # Update Things notes to reference the daily log link
-                    rel_filepath = os.path.join(logs_relative, f"{today_date_str}.md")
-                    encoded_path = urllib.parse.quote(rel_filepath)
-                    obsidian_link = f"obsidian://open?vault={urllib.parse.quote(vault_name)}&file={encoded_path}"
-                    
-                    new_notes = f"{t_notes}\n\n{obsidian_link}".strip() if t_notes else obsidian_link
-                    things.update_task_notes(t_uuid, new_notes)
-        except Exception as e:
-            print(f"  [!] Failed to import tagged tasks: {e}")
-            
+    # Save metadata mapping file if changed
+    if metadata_changed:
+        print("[*] Saving metadata updates to sync_metadata.json...")
+        save_metadata(metadata)
+        
     print("-" * 50)
     print("Sync complete!")
 
