@@ -4,8 +4,7 @@ import hashlib
 
 class ObsidianAPI:
     """
-    Read-only parser for Obsidian Daily Log markdown files.
-    This class never modifies or writes to your markdown files.
+    Parser and updater for Obsidian Daily Log markdown files.
     """
     def __init__(self, vault_path, relative_logs_path):
         self.vault_path = vault_path
@@ -64,3 +63,59 @@ class ObsidianAPI:
             raise RuntimeError(f"Error parsing daily log {filepath}: {e}")
             
         return tasks
+
+    def update_task_status(self, filepath, line_no, title, completed=True):
+        """
+        Updates a task's status to completed ([x]) or incomplete ([ ]) in the Obsidian file.
+        Attempts to use line_no first, and falls back to searching by title if line_no doesn't match.
+        Returns True if the task was found and updated, False otherwise.
+        """
+        if not os.path.exists(filepath):
+            return False
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            target_char = 'x' if completed else ' '
+            updated = False
+
+            def update_line(line, target_status):
+                match = self.task_regex.match(line.rstrip('\r\n'))
+                if match:
+                    status_char = match.group(2)
+                    # Replace the first occurrence of f"[{status_char}]" with the target status
+                    return line.replace(f"[{status_char}]", f"[{target_status}]", 1)
+                return line
+
+            # Try exact line number first
+            if line_no < len(lines):
+                line = lines[line_no]
+                match = self.task_regex.match(line.rstrip('\r\n'))
+                if match and match.group(3).strip() == title:
+                    status_char = match.group(2)
+                    current_completed = status_char.lower() == 'x'
+                    if current_completed != completed:
+                        lines[line_no] = update_line(line, target_char)
+                        updated = True
+
+            # Fallback: scan all lines if not updated at line_no
+            if not updated:
+                for idx, line in enumerate(lines):
+                    match = self.task_regex.match(line.rstrip('\r\n'))
+                    if match and match.group(3).strip() == title:
+                        status_char = match.group(2)
+                        current_completed = status_char.lower() == 'x'
+                        if current_completed != completed:
+                            lines[idx] = update_line(line, target_char)
+                            updated = True
+                            break
+
+            if updated:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+                return True
+            
+            return False
+        except Exception as e:
+            raise RuntimeError(f"Error updating task status in daily log {filepath}: {e}")

@@ -56,11 +56,13 @@ def main():
     logs_relative = config["daily_logs_relative_path"]
     db_path = config["things_db_path"]
     sync_days = config.get("sync_days", 7)
+    obsidian_write_mode = config.get("obsidian_write_mode", False)
     
     # Extract Obsidian vault name from path
     vault_name = os.path.basename(os.path.normpath(vault_path))
     
-    print("Initializing sync (Obsidian Read-Only Mode)...")
+    mode_str = "Write Mode" if obsidian_write_mode else "Read-Only Mode"
+    print(f"Initializing sync (Obsidian {mode_str})...")
     print(f"Obsidian Vault: {vault_path} (Name: {vault_name})")
     print(f"Things DB: {db_path}")
     print(f"Sync Window: Last {sync_days} days")
@@ -148,8 +150,20 @@ def main():
                         print(f"  [-> Things] Completing task: '{title}'")
                         things.update_task_status(uuid, 'completed')
                     elif not completed and things_status in [3, 1]:
-                        # Things is completed, but Obsidian is Read-only. Log and skip.
-                        pass
+                        # Things is completed/canceled, Obsidian is open -> Complete in Obsidian if write mode is enabled
+                        if obsidian_write_mode:
+                            status_str = "completed" if things_status == 3 else "canceled"
+                            print(f"  [-> Obsidian] Marking task as {status_str}: '{title}'")
+                            try:
+                                success = obsidian.update_task_status(filepath, task["line_no"], title, completed=True)
+                                if not success:
+                                    print(f"    [!] Failed to update Obsidian task status for '{title}'")
+                            except Exception as e:
+                                print(f"    [!] Error updating Obsidian task: {e}")
+                        else:
+                            # Obsidian is Read-only. Log and skip.
+                            status_str = "completed" if things_status == 3 else "canceled"
+                            print(f"  [~] Task is {status_str} in Things: '{title}' (Obsidian is Read-Only, skipping update)")
                 except Exception as e:
                     print(f"  [!] Error checking status for task '{title}' ({uuid}): {e}")
                     
