@@ -1,0 +1,7 @@
+{
+  "obsidian_vault_path": "/path/to/your/Obsidian Vault",
+  "daily_logs_relative_path": "02_Areas/Calendar",
+  "things_db_path": "/Users/USERNAME/Library/Group Containers/XXXXXXX.com.culturedcode.ThingsMac/ThingsData-YYYYY/Things Database.thingsdatabase/main.sqlite",
+  "sync_days": 7,
+  "things_import_tag": "obsidian"
+}
